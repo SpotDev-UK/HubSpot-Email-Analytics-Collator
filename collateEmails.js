@@ -31,29 +31,29 @@ const endpoints = {
 
 // Create an Axios instance with default configuration
 function createAxiosInstance() {
-	return axios.create({
-		baseURL: configuration.baseUniformResourceLocator,
-		headers: {
-			Authorization: `Bearer ${configuration.hubSpotAccessToken}`,
-			"Content-Type": "application/json",
-		},
-	});
+    return axios.create({
+			baseURL: configuration.baseUniformResourceLocator,
+			headers: {
+				Authorization: `Bearer ${configuration.hubSpotAccessToken}`,
+				"Content-Type": "application/json",
+			},
+		});
 }
 
 // Ensure the output directory exists
 function ensureOutputDirectoryExists() {
-	if (!fileSystem.existsSync(configuration.outputDirectory)) {
-		fileSystem.mkdirSync(configuration.outputDirectory, { recursive: true });
-	}
+    if (!fileSystem.existsSync(configuration.outputDirectory)) {
+			fileSystem.mkdirSync(configuration.outputDirectory, { recursive: true });
+		}
 }
 
 // Ensure the salesforce_sends directory exists
 function ensureSalesforceSendsDirectoryExists() {
-	if (!fileSystem.existsSync(configuration.salesforceSendsDirectory)) {
-		fileSystem.mkdirSync(configuration.salesforceSendsDirectory, {
-			recursive: true,
-		});
-	}
+    if (!fileSystem.existsSync(configuration.salesforceSendsDirectory)) {
+			fileSystem.mkdirSync(configuration.salesforceSendsDirectory, {
+				recursive: true,
+			});
+		}
 }
 
 // Fetch all HubSpot email events
