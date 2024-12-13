@@ -27,33 +27,34 @@ const endpoints = {
 	emailCampaignVersionOne: "/email/public/v1/campaigns",
 	emailContentVersionOne: "/marketing-emails/v1/emails/with-statistics",
 	marketingEmailsVersionThree: "/marketing/v3/emails",
+	hubspotCampaign: "/marketing/v3/campaigns",
 };
 
 // Create an Axios instance with default configuration
 function createAxiosInstance() {
-    return axios.create({
-			baseURL: configuration.baseUniformResourceLocator,
-			headers: {
-				Authorization: `Bearer ${configuration.hubSpotAccessToken}`,
-				"Content-Type": "application/json",
-			},
-		});
+	return axios.create({
+		baseURL: configuration.baseUniformResourceLocator,
+		headers: {
+			Authorization: `Bearer ${configuration.hubSpotAccessToken}`,
+			"Content-Type": "application/json",
+		},
+	});
 }
 
 // Ensure the output directory exists
 function ensureOutputDirectoryExists() {
-    if (!fileSystem.existsSync(configuration.outputDirectory)) {
-			fileSystem.mkdirSync(configuration.outputDirectory, { recursive: true });
-		}
+	if (!fileSystem.existsSync(configuration.outputDirectory)) {
+		fileSystem.mkdirSync(configuration.outputDirectory, { recursive: true });
+	}
 }
 
 // Ensure the salesforce_sends directory exists
 function ensureSalesforceSendsDirectoryExists() {
-    if (!fileSystem.existsSync(configuration.salesforceSendsDirectory)) {
-			fileSystem.mkdirSync(configuration.salesforceSendsDirectory, {
-				recursive: true,
-			});
-		}
+	if (!fileSystem.existsSync(configuration.salesforceSendsDirectory)) {
+		fileSystem.mkdirSync(configuration.salesforceSendsDirectory, {
+			recursive: true,
+		});
+	}
 }
 
 // Fetch all HubSpot email events
@@ -143,63 +144,80 @@ async function getEmailContent(contentIdentifier) {
 	}
 }
 
+// Fetch the HubSpot campaign details (NEW function to handle campaign inclusion)
+async function getHubSpotCampaign(campaignId) {
+	const applicationProgrammingInterface = createAxiosInstance();
+	try {
+		const response = await applicationProgrammingInterface.get(
+			`${endpoints.hubspotCampaign}/${campaignId}`
+		);
+		return response.data;
+	} catch (error) {
+		console.error(
+			`Error fetching HubSpot campaign details for ${campaignId}:`,
+			error.message
+		);
+		return null;
+	}
+}
+
 // Process events for a single campaign to determine engagement and recipients.
-// We will also store the ID of the SENT/DELIVERED/PROCESSED event that "introduced" the recipient.
-// This event ID will be used as HubSpot_Email_Send_ID__c.
+// Will store counts of opens, clicks, replies, and unsubscribes per recipient.
+// Also stores the ID of the SENT/DELIVERED/PROCESSED event that "introduced" the recipient.
 function processEmailEvents(campaignIdentifier, allEvents) {
 	const emailEvents = allEvents.filter(
 		(event) => event.emailCampaignId === campaignIdentifier
 	);
 
-	const openedRecipientsSet = new Set();
-	const clickedRecipientsSet = new Set();
-	const unsubscribedRecipientsSet = new Set();
-	const sentToRecipientsSet = new Set();
-
-	// For storing the send event ID per recipient
-	const sendEventIds = {};
+	// Initialize a map to store per-recipient event counts and info
+	const recipientEventsMap = {};
 
 	emailEvents.forEach((event) => {
 		const recipientEmailAddress = event.recipient;
 		const eventType = event.type;
 
+		// Initialize recipient data if not already present
+		if (!recipientEventsMap[recipientEmailAddress]) {
+			recipientEventsMap[recipientEmailAddress] = {
+				opens: 0,
+				clicks: 0,
+				replies: 0,
+				unsubscribed: false,
+				sendEventId: null,
+			};
+		}
+
+		const recipientData = recipientEventsMap[recipientEmailAddress];
+
 		// Identify sent-related events
-		// For example: SENT, DELIVERED, PROCESSED are typically "sending" events
-		// We will use the first such event to get the HubSpot_Email_Send_ID__c
 		if (
 			eventType === "SENT" ||
 			eventType === "DELIVERED" ||
 			eventType === "PROCESSED"
 		) {
-			sentToRecipientsSet.add(recipientEmailAddress);
-			// If we have not already recorded a send ID for this recipient, record it now
-			if (!sendEventIds[recipientEmailAddress]) {
-				sendEventIds[recipientEmailAddress] = event.id;
+			if (!recipientData.sendEventId) {
+				recipientData.sendEventId = event.id;
 			}
 		}
 
 		// Track engagement
 		switch (eventType) {
 			case "OPEN":
-				openedRecipientsSet.add(recipientEmailAddress);
+				recipientData.opens += 1;
 				break;
 			case "CLICK":
-				clickedRecipientsSet.add(recipientEmailAddress);
+				recipientData.clicks += 1;
 				break;
 			case "UNSUBSCRIBE":
-				unsubscribedRecipientsSet.add(recipientEmailAddress);
+				recipientData.unsubscribed = true;
+				break;
+			case "REPLY":
+				recipientData.replies += 1;
 				break;
 		}
 	});
 
-	return {
-		opens: Array.from(openedRecipientsSet),
-		clicks: Array.from(clickedRecipientsSet),
-		unsubscribes: Array.from(unsubscribedRecipientsSet),
-		sentTo: Array.from(sentToRecipientsSet),
-		allEvents: emailEvents,
-		sendEventIds: sendEventIds,
-	};
+	return recipientEventsMap;
 }
 
 // This function determines if a HubSpot contact is a Salesforce Contact or Lead by simulating that lookup.
@@ -224,9 +242,7 @@ async function writeSalesforceSendPayloadToFile(parameters) {
 		recipient,
 		campaignIdentifier,
 		hubSpotSendIdentifier,
-		opened,
-		clicked,
-		unsubscribed,
+		recipientData,
 	} = parameters;
 
 	// Map fields to what would have been sent to Salesforce
@@ -243,10 +259,10 @@ async function writeSalesforceSendPayloadToFile(parameters) {
 		Email_Address__c: recipient,
 		HubSpot_Email_Campaign__c: campaignIdentifier,
 		HubSpot_Email_Send_ID__c: hubSpotSendIdentifier || "N/A",
-		Total_Clicks__c: clicked ? 1 : 0,
-		Total_Opened__c: opened ? 1 : 0,
-		Total_Replies__c: 0,
-		Unsubscribed__c: unsubscribed ? true : false,
+		Total_Clicks__c: recipientData.clicks || 0, // Using count of contact's clicks
+		Total_Opened__c: recipientData.opens || 0, // Using count of contact's opens
+		Total_Replies__c: recipientData.replies || 0, // Using count of contact's replies
+		Unsubscribed__c: recipientData.unsubscribed, // Whether the contact unsubscribed
 	};
 
 	// Ensure the directory exists
@@ -268,18 +284,13 @@ async function writeSalesforceSendPayloadToFile(parameters) {
 async function writeAllEmailSendsToFiles(analysisResults) {
 	for (const campaignAnalysis of analysisResults) {
 		const campaignIdentifier = campaignAnalysis.id;
-		// Retrieve the map of recipient -> send event ID
-		const sendEventIds = campaignAnalysis.sendEventIds || {};
+		const recipientEventsMap = campaignAnalysis.recipientEventsMap; // Access the recipient event data
 
-		for (const recipient of campaignAnalysis.sentTo) {
-			// Determine engagement flags for this recipient
-			const opened = campaignAnalysis.engagement.opens.includes(recipient);
-			const clicked = campaignAnalysis.engagement.clicks.includes(recipient);
-			const unsubscribed =
-				campaignAnalysis.engagement.unsubscribes.includes(recipient);
+		for (const recipient in recipientEventsMap) {
+			const recipientData = recipientEventsMap[recipient];
 
 			// Use the event ID from the sent events as the HubSpot_Email_Send_ID__c
-			const hubSpotSendIdentifier = sendEventIds[recipient] || "N/A";
+			const hubSpotSendIdentifier = recipientData.sendEventId || "N/A";
 
 			// Determine if this recipient maps to a Salesforce Contact or Lead
 			const salesforceRecord =
@@ -298,9 +309,7 @@ async function writeAllEmailSendsToFiles(analysisResults) {
 				recipient: recipient,
 				campaignIdentifier: campaignIdentifier,
 				hubSpotSendIdentifier: hubSpotSendIdentifier,
-				opened: opened,
-				clicked: clicked,
-				unsubscribed: unsubscribed,
+				recipientData: recipientData, // Pass the recipient data
 			});
 		}
 	}
@@ -332,21 +341,54 @@ async function compileEmailAnalytics() {
 				? await getEmailContent(campaignDetails.contentId)
 				: null;
 
+			let includeCampaign = true; // Flag to determine whether to include this campaign
+
+			if (contentDetails && contentDetails.campaign) {
+				const hubspotCampaignId = contentDetails.campaign;
+				const hubspotCampaignDetails = await getHubSpotCampaign(
+					hubspotCampaignId
+				);
+				if (hubspotCampaignDetails) {
+					const updatedAt = new Date(hubspotCampaignDetails.updatedAt);
+					const watermarkDate = new Date("2024-01-01T01:01:01.001Z");
+					if (updatedAt < watermarkDate) {
+						// Campaign is older than the watermark date, skip it
+						includeCampaign = false;
+						console.log(
+							`Skipping campaign ${campaignIdentifier} due to updatedAt before watermark date`
+						);
+					}
+				} else {
+					// No hubspotCampaignDetails retrieved, skip this campaign
+					includeCampaign = false;
+					console.log(
+						`Skipping campaign ${campaignIdentifier} due to missing hubspotCampaign details`
+					);
+				}
+			} else {
+				// No campaign associated with content, skip this campaign
+				includeCampaign = false;
+				console.log(
+					`Skipping campaign ${campaignIdentifier} due to missing content or campaign`
+				);
+			}
+
+			if (!includeCampaign) {
+				continue; // Skip this campaign
+			}
+
 			// Process events to determine engagement and recipients
-			const eventData = processEmailEvents(campaignIdentifier, allEvents);
+			const recipientEventsMap = processEmailEvents(
+				campaignIdentifier,
+				allEvents
+			);
 
 			// Prepare the analysis object
 			const analysis = {
 				id: campaignIdentifier,
 				campaign: campaignDetails,
 				content: contentDetails,
-				engagement: {
-					opens: eventData.opens,
-					clicks: eventData.clicks,
-					unsubscribes: eventData.unsubscribes,
-				},
-				sentTo: eventData.sentTo,
-				sendEventIds: eventData.sendEventIds,
+				recipientEventsMap: recipientEventsMap,
 			};
 
 			results.push(analysis);
@@ -403,4 +445,5 @@ module.exports = {
 	processEmailEvents,
 	determineIfHubSpotContactIsSalesforceContactOrLead,
 	writeSalesforceSendPayloadToFile,
+	getHubSpotCampaign,
 };
